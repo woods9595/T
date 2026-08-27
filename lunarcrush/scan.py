@@ -50,6 +50,8 @@ EXCLUDED = {
     "WETH", "STETH", "WSTETH", "WEETH", "RETH", "EZETH", "RSETH", "CBETH",
     "WBETH", "METH", "OSETH", "SWETH", "ANKRETH",
     "WBNB", "BSC-USD", "JITOSOL", "MSOL", "BNSOL", "JUPSOL",
+    # actifs adosses (or tokenise, treasuries) : pas de cycle propre non plus
+    "XAUT", "PAXG", "USYC", "FIGR_HELOC", "BUIDL", "OUSG",
 }
 
 _last_call = [0.0]
@@ -187,18 +189,29 @@ def analyse(coin, rows, now_ts):
     chg_48h = pct(close[-1], close[-3]) if len(close) > 2 else 0.0
 
     spam_penalty = 1.0 - min(spam_share, 0.6)
+    # Le poids porte sur le dernier jour plein, pas sur la moyenne 48h : une
+    # moyenne reste haute pendant toute la retombee d'un pic et signalerait
+    # comme "chaud" un emballement deja termine.
     raw = (
-        0.40 * min(surge_48h, 5.0) / 5.0
-        + 0.30 * min(breadth, 5.0) / 5.0
+        0.35 * min(surge_24h, 5.0) / 5.0
+        + 0.25 * min(breadth, 5.0) / 5.0
         + 0.15 * min(max(z_int, 0.0), 8.0) / 8.0
-        + 0.15 * min(max(accel - 1.0, 0.0), 2.0) / 2.0
+        + 0.25 * min(max(accel - 1.0, 0.0), 2.0) / 2.0
     )
     score = round(raw * 100 * spam_penalty, 1)
 
+    # Un pic passe puis retombe n'est pas une opportunite : on le sort
+    # explicitement plutot que de le laisser se fondre dans CALME, parce que
+    # c'est justement le cas qu'une moyenne 48h fait passer pour un signal.
+    recent_peak = max(inter[-5:]) / med_int
+    faded = recent_peak >= 2.5 and surge_24h < 1.2
+
     # Le stade compte autant que le score : un emballement social deja paye
     # par le prix n'est plus une entree en debut de cycle.
-    hot = surge_48h >= 1.5 and breadth >= 1.2
-    if not hot:
+    hot = surge_24h >= 1.5 and breadth >= 1.2
+    if faded:
+        stage = "RETOMBE"
+    elif not hot:
         stage = "CALME"
     elif chg_7d > 30 or chg_24h > 15:
         stage = "TARDIF"
@@ -218,6 +231,7 @@ def analyse(coin, rows, now_ts):
         "pace_today": pace,
         "breadth": round(breadth, 2),
         "accel": round(accel, 2),
+        "recent_peak": round(recent_peak, 2),
         "z_interactions": round(z_int, 1),
         "spam_share": round(spam_share, 3),
         "interactions_last_full_day": int(inter[-1]),
@@ -236,6 +250,10 @@ def main():
     ap = argparse.ArgumentParser(description="Scanner d'engagement social LunarCrush")
     ap.add_argument("--top", type=int, default=30, help="taille du classement (defaut 30)")
     ap.add_argument("--no-filter", action="store_true", help="garder stables et tokens wrappes")
+    ap.add_argument("--min-price", type=float, help="prix unitaire minimum en USD")
+    ap.add_argument("--max-price", type=float, help="prix unitaire maximum en USD")
+    ap.add_argument("--include", default="", help="symboles a suivre en plus, separes par des virgules")
+    ap.add_argument("--scan-depth", type=int, default=1000, help="profondeur du listing balaye (defaut 1000)")
     ap.add_argument("--cache-only", action="store_true", help="relire le cache sans appeler l'API")
     ap.add_argument("--min-score", type=float, default=0.0, help="n'afficher qu'au-dessus de ce score")
     args = ap.parse_args()
@@ -253,13 +271,36 @@ def main():
     else:
         # On demande large puis on filtre : stables et wrapped occupent une
         # bonne partie du top et evinceraient de vraies cryptos du classement.
-        listing = fetch(f"coins/list/v1?sort=market_cap&limit={args.top * 2 + 20}", key)
+        depth = args.scan_depth if (args.min_price or args.max_price or args.include) \
+            else args.top * 2 + 20
+        listing = fetch(f"coins/list/v1?sort=market_cap&limit={depth}", key)
         coins = listing["data"]
         (CACHE / "_list.json").write_text(json.dumps(coins))
 
     if not args.no_filter:
         coins = [c for c in coins if c["symbol"].upper() not in EXCLUDED]
-    coins = coins[: args.top]
+    if args.min_price is not None:
+        coins = [c for c in coins if (c.get("price") or 0) >= args.min_price]
+    if args.max_price is not None:
+        coins = [c for c in coins if (c.get("price") or 0) <= args.max_price]
+    band_size = len(coins)
+    selected = coins[: args.top]
+
+    # Les symboles de --include sont suivis meme hors du top : ils servent de
+    # point de comparaison quand le classement ne les remonte pas.
+    wanted = [s.strip().upper() for s in args.include.split(",") if s.strip()]
+    if wanted:
+        have = {c["symbol"].upper() for c in selected}
+        by_sym = {c["symbol"].upper(): c for c in coins}
+        for sym in wanted:
+            if sym not in have and sym in by_sym:
+                selected.append(by_sym[sym])
+            elif sym not in by_sym:
+                print(f"  {sym} introuvable dans les {len(coins)} resultats", file=sys.stderr)
+    coins = selected
+    if args.min_price is not None or args.max_price is not None:
+        print(f"Bande de prix : {band_size} cryptos, on garde les {args.top} plus "
+              f"grosses capitalisations{' + ' + ','.join(wanted) if wanted else ''}.", file=sys.stderr)
 
     print(f"Scan de {len(coins)} cryptos ({'cache' if args.cache_only else 'API'})...", file=sys.stderr)
 
@@ -292,29 +333,31 @@ def main():
         indent=2,
     ))
 
-    order = {"PRECOCE": 0, "EN COURS": 1, "TARDIF": 2, "CALME": 3}
+    order = {"PRECOCE": 0, "EN COURS": 1, "TARDIF": 2, "RETOMBE": 3, "CALME": 4}
     shown = [r for r in results if r["score"] >= args.min_score]
     ref = results[0]["last_full_day_utc"] if results else "?"
 
-    print(f"\nDernier jour plein : {ref} UTC   (x48h = engagement vs base 30j, "
-          f"LARG = audience unique, AUJ = jour en cours extrapole)")
-    print(f"\n{'SYM':<7}{'SCORE':>6}  {'STADE':<9}{'x48h':>6}{'AUJ':>6}{'LARG':>6}"
-          f"{'SPAM':>6}{'24H%':>8}{'7J%':>8}  ENGAGEMENT 14 JOURS PLEINS")
-    print("-" * 96)
+    print(f"\nDernier jour plein : {ref} UTC   (x24h = engagement du jour vs base 30j, "
+          f"AUJ = jour en cours extrapole, LARG = audience unique, ACC = acceleration)")
+    print(f"\n{'SYM':<7}{'SCORE':>6}  {'STADE':<9}{'x24h':>6}{'AUJ':>6}{'LARG':>6}{'ACC':>6}"
+          f"{'SPAM':>6}{'24H%':>7}{'7J%':>7}  ENGAGEMENT 14 JOURS PLEINS")
+    print("-" * 102)
     for r in sorted(shown, key=lambda r: (order[r["stage"]], -r["score"])):
         pace = f"{r['pace_today']:>6.1f}" if r["pace_today"] is not None else "     -"
         print(f"{r['symbol']:<7}{r['score']:>6.1f}  {r['stage']:<9}"
-              f"{r['surge_48h']:>6.2f}{pace}{r['breadth']:>6.2f}"
-              f"{r['spam_share']*100:>5.0f}%{r['chg_24h']:>8.1f}{r['chg_7d']:>8.1f}  {r['sparkline']}")
+              f"{r['surge_24h']:>6.2f}{pace}{r['breadth']:>6.2f}{r['accel']:>6.1f}"
+              f"{r['spam_share']*100:>5.0f}%{r['chg_24h']:>7.1f}{r['chg_7d']:>7.1f}  {r['sparkline']}")
 
     for label, title in (("PRECOCE", "emballement social, prix pas encore parti"),
-                         ("EN COURS", "le prix commence a suivre")):
+                         ("EN COURS", "le prix commence a suivre"),
+                         ("RETOMBE", "pic deja passe, l'engagement redescend")):
         sel = [r for r in results if r["stage"] == label]
         print(f"\n{len(sel)} signal(s) {label} ({title}) :")
         for r in sel:
-            print(f"  {r['symbol']:<6} engagement x{r['surge_48h']:.1f} "
+            print(f"  {r['symbol']:<6} engagement x{r['surge_24h']:.1f} "
                   f"({r['baseline_interactions']:,} -> {r['interactions_last_full_day']:,}/j), "
                   f"audience x{r['breadth']:.1f}, accel x{r['accel']:.1f}, "
+                  f"pic 5j x{r['recent_peak']:.1f}, "
                   f"prix 24h {r['chg_24h']:+.1f}% / 7j {r['chg_7d']:+.1f}%")
         if not sel:
             print("  aucun.")
