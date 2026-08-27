@@ -1,0 +1,3 @@
+# Dumps bruts de l'API : volumineux, regenerables, non versionnes.
+lunarcrush/cache/
+.env
