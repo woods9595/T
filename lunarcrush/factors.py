@@ -65,7 +65,7 @@ def compute_factors(rows, i):
     Toute fenetre se termine a i inclus : aucune donnee posterieure n'entre
     dans le calcul, sinon le backtest se regarde lui-meme.
     """
-    if i < 370:
+    if i < 200:
         return None
     close = [float(r.get("close") or 0) for r in rows]
     con = [float(r.get("contributors_active") or 0) for r in rows]
@@ -82,11 +82,16 @@ def compute_factors(rows, i):
 
     f = {}
     f["mom_6m"] = (p / close[i - 180] - 1) if close[i - 180] > 0 else None
+    hi6 = max(close[i - 180:i + 1])
+    f["drawdown_6m"] = (p / hi6 - 1) if hi6 > 0 else None
     f["mom_3m"] = (p / close[i - 90] - 1) if close[i - 90] > 0 else None
     f["mom_1m"] = (p / close[i - 30] - 1) if close[i - 30] > 0 else None
 
-    hi = max(close[i - 360:i + 1])
-    f["drawdown_12m"] = (p / hi - 1) if hi > 0 else None
+    if i >= 360:
+        hi = max(close[i - 360:i + 1])
+        f["drawdown_12m"] = (p / hi - 1) if hi > 0 else None
+    else:
+        f["drawdown_12m"] = None
 
     # Croissance de la base d'audience : 30 derniers jours contre les 90 qui
     # precedent. C'est la version longue du critere qui portait le detecteur
@@ -142,7 +147,7 @@ def spearman(xs, ys):
     return num / den if den else None
 
 
-FACTORS = ["mom_6m", "mom_3m", "mom_1m", "drawdown_12m", "contrib_growth",
+FACTORS = ["mom_6m", "mom_3m", "mom_1m", "drawdown_12m", "drawdown_6m", "contrib_growth",
            "interactions_growth", "social_dom_growth", "attention_ratio",
            "sentiment", "galaxy", "volume_growth"]
 
@@ -190,10 +195,17 @@ def run_backtest(data, horizons=(90, 180), step=15):
     facteur n'apporte rien, quel que soit l'aspect du backtest en cumul.
     """
     idx = {s: {r["time"]: k for k, r in enumerate(rows)} for s, rows in data.items()}
-    dates = sorted(set.intersection(*[set(idx[s]) for s in data]) if data else [])
-    if not dates:
+    if not data:
         return {}, []
-    usable = [t for t in dates if all(idx[s][t] >= 370 for s in data)]
+    # Panel a composition variable : exiger que toutes les cryptos soient
+    # presentes a chaque date viderait l'echantillon des le premier actif
+    # recent. On garde les dates ou assez de cryptos ont l'historique requis.
+    counts = {}
+    for s in data:
+        for t, k in idx[s].items():
+            if k >= 200:
+                counts[t] = counts.get(t, 0) + 1
+    usable = sorted(t for t, n in counts.items() if n >= 20)
     sample = usable[::step]
 
     results = {h: {f: [] for f in FACTORS} for h in horizons}
@@ -201,7 +213,9 @@ def run_backtest(data, horizons=(90, 180), step=15):
     for t in sample:
         feats, fwd = {}, {}
         for s, rows in data.items():
-            i = idx[s][t]
+            i = idx[s].get(t)
+            if i is None or i < 200:
+                continue
             f = compute_factors(rows, i)
             if not f:
                 continue
@@ -234,13 +248,19 @@ def decile_test(data, factor, horizon=180, step=15, top_n=8):
     rapporte en pratique, ecart au marche compris.
     """
     idx = {s: {r["time"]: k for k, r in enumerate(rows)} for s, rows in data.items()}
-    dates = sorted(set.intersection(*[set(idx[s]) for s in data]))
-    usable = [t for t in dates if all(idx[s][t] >= 370 for s in data)][::step]
+    counts = {}
+    for s in data:
+        for t, k in idx[s].items():
+            if k >= 200:
+                counts[t] = counts.get(t, 0) + 1
+    usable = sorted(t for t, n in counts.items() if n >= 20)[::step]
     rows_out = []
     for t in usable:
         vals, fwd = {}, {}
         for s, rws in data.items():
-            i = idx[s][t]
+            i = idx[s].get(t)
+            if i is None or i < 200:
+                continue
             f = compute_factors(rws, i)
             j = i + horizon
             if not f or f.get(factor) is None or j >= len(rws):

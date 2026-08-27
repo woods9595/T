@@ -162,3 +162,81 @@ Limites : 30 jours d'historique, une seule phase de marche (haussiere),
 n = 12 sur l'horizon 7 jours. Ces chiffres ne suffisent ni a valider ni a
 rejeter definitivement la methode — ils suffisent en revanche a dire qu'elle
 n'est pas prete a porter des decisions d'investissement.
+
+---
+
+# factors.py — backtest factoriel 22 mois
+
+L'API accepte des bornes `start`/`end` explicites et remonte **659 jours**, la
+ou `interval=1m` plafonne a 30. De quoi tester sur plusieurs regimes au lieu
+d'extrapoler depuis une seule phase haussiere.
+
+```bash
+python3 lunarcrush/factors.py --fetch --universe 60   # ~7 min
+python3 lunarcrush/factors.py --backtest
+```
+
+Methode : classement **transversal** (chaque crypto comparee aux autres a la
+meme date), pouvoir predictif mesure facteur par facteur via la correlation de
+rang avec le rendement futur (IC). Un score compose n'aurait pas ete
+verifiable.
+
+## Ce que dit le backtest
+
+IC moyen, horizon 180 jours, 19 dates :
+
+| facteur | IC | dates positives | lecture |
+|---|---|---|---|
+| `drawdown_12m` | **+0,269** | **100 %** | proche des plus hauts 12 mois = surperformance |
+| `drawdown_6m` | +0,242 | 100 % | idem |
+| `attention_ratio` | **−0,236** | **0 %** | attention sociale elevee rapportee a la taille = sous-performance |
+| `sentiment` | −0,207 | 5 % | sentiment eleve = sous-performance |
+| `galaxy` | −0,144 | 11 % | le score compose de LunarCrush est negativement predictif |
+| `contrib_growth` | +0,030 | 68 % | nul |
+| `interactions_growth` | −0,002 | 53 % | nul |
+
+**Les metriques sociales sont contrariennes ou inutiles.** La croissance
+d'engagement, sur laquelle reposaient `scan.py` et `ignition.py`, n'a aucun
+pouvoir predictif a 3-6 mois. En revanche l'attention rapportee a la
+capitalisation predit systematiquement une SOUS-performance : 0 date positive
+sur 19.
+
+## Rendements effectifs (groupe de tete de 8, horizon 180j)
+
+| strategie | tete | marche | ecart | gagnants | >+50 % |
+|---|---|---|---|---|---|
+| force du prix (`drawdown_12m`) | +1,9 % | −29,4 % | **+31,3 %** | 66 % | 11 % |
+| attention faible | −11,9 % | −30,0 % | +18,1 % | 43 % | 3 % |
+| sentiment faible | −9,1 % | −30,0 % | +21,0 % | 42 % | 20 % |
+| combine force + attention faible | +0,9 % | −29,4 % | +30,3 % | 59 % | 6 % |
+
+La mediane de l'univers a perdu 29 % sur les fenetres testees : la periode est
+majoritairement baissiere, ce qui en fait un test plus severe que les 30 jours
+haussiers des modules precedents.
+
+**La force du prix est le meilleur facteur et le combiner n'apporte rien.**
+Mais l'objectif +50 % n'est atteint que par 11 % des selections a 6 mois : la
+strategie protege le capital (+1,9 % contre −29,4 %) bien plus qu'elle ne
+produit des multiples.
+
+## Filtres appliques au classement
+
+- **volatilite annualisee ≥ 40 %** : un actif qui ne bouge pas ne peut pas
+  delivrer +50 %. Ecarte SUSDE (2 %), USDY (11 %), TRX (26 %), JLP (38 %).
+- **couverture sociale ≥ 80 %** des 180 derniers jours : ecarte les series
+  dont les champs sociaux sont vides (FTN, BGB).
+
+## Limites — a lire avant d'agir
+
+1. **Biais du survivant.** L'univers est constitue des cryptos aujourd'hui
+   dans le top 300. Celles qui ont disparu n'y figurent pas, ce qui gonfle
+   mecaniquement tout resultat.
+2. **Fenetres chevauchantes.** 19 dates a l'horizon 180 jours avec un pas de
+   15 jours representent 3 a 4 periodes reellement independantes.
+3. **Un IC de 0,27 est tres eleve** pour un facteur : c'est un signe de
+   dependance au regime, pas de robustesse. « Acheter la force » fonctionne
+   en marche disperse ou baissier et se retourne aux inflexions de tendance.
+4. **La force du prix est un facteur generique** (momentum), connu depuis
+   des decennies et sans rapport avec LunarCrush. Le seul apport propre aux
+   donnees LunarCrush est negatif : ses metriques sociales servent a ecarter,
+   pas a selectionner.
